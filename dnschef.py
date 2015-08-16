@@ -5,9 +5,10 @@
 # for the latest version and documentation. Please forward all issues and
 # concerns to iphelix [at] thesprawl.org.
 
-DNSCHEF_VERSION = "0.3"
+DNSCHEF_VERSION = "0.4"
 
 # Copyright (C) 2014 Peter Kacherginsky
+# Copyright (C) 2015 Oleg Kupreev
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -40,15 +41,16 @@ from dnslib import QTYPE, RDMAP, RR, QR
 from dnslib import DNSLabel, DNSRecord, DNSHeader
 from IPy import IP
 
-# import threading
+
 from threading import Thread
-# import random
 from random import choice
-import operator
-import SocketServer
-import socket
-import sys
-import binascii
+from os import geteuid
+from operator import itemgetter
+from SocketServer import TCPServer, UDPServer, BaseRequestHandler, ThreadingMixIn
+from socket import socket, AF_INET, AF_INET6, SOCK_STREAM, SOCK_DGRAM
+from sys import exit
+from binascii import unhexlify
+# import binascii
 import base64
 import time
 
@@ -113,8 +115,10 @@ class DNSHandler(object):
                         times = tuple([int(t) for t in [t1, t2, t3, t4, t5]])
 
                         # dnslib doesn't like trailing dots
-                        if mname[-1] == ".": mname = mname[:-1]
-                        if rname[-1] == ".": rname = rname[:-1]
+                        if mname[-1] == ".":
+                            mname = mname[:-1]
+                        if rname[-1] == ".":
+                            rname = rname[:-1]
 
                         response.add_answer(RR(qname, getattr(QTYPE, qtype), rdata=RDMAP[qtype](mname, rname, times)))
 
@@ -282,11 +286,13 @@ class DNSHandler(object):
 
         return response
 
-
-        # Find appropriate ip address to use for a queried name. The function can
-
     def findnametodns(self, qname, nametodns):
-
+        """
+        Find appropriate ip address to use for a queried name. The function can
+        :param qname:
+        :param nametodns:
+        :return:
+        """
         # Make qname case insensitive
         qname = qname.lower()
 
@@ -296,7 +302,7 @@ class DNSHandler(object):
 
         # HACK: It is important to search the nametodns dictionary before iterating it so that
         # global matching ['*.*.*.*.*.*.*.*.*.*'] will match last. Use sorting for that.
-        for domain, host in sorted(nametodns.iteritems(), key=operator.itemgetter(1)):
+        for domain, host in sorted(nametodns.iteritems(), key=itemgetter(1)):
 
             # NOTE: It is assumed that domain name was already lowercased
             #       when it was loaded through --file, --fakedomains or --truedomains
@@ -316,27 +322,33 @@ class DNSHandler(object):
         else:
             return False
 
-    # Obtain a response from a real DNS server.
     def proxyrequest(self, request, host, port="53", protocol="udp"):
+        """
+        Obtain a response from a real DNS server.
+        :param request:
+        :param host:
+        :param port:
+        :param protocol:
+        :return:
+        """
         reply = None
         try:
             if self.server.ipv6:
 
                 if protocol == "udp":
-                    sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+                    sock = socket(AF_INET6, SOCK_DGRAM)
                 elif protocol == "tcp":
-                    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                    sock = socket(AF_INET6, SOCK_STREAM)
 
             else:
                 if protocol == "udp":
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    sock = socket(AF_INET, SOCK_DGRAM)
                 elif protocol == "tcp":
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock = socket(AF_INET, SOCK_STREAM)
 
             sock.settimeout(3.0)
 
             # Send the proxy request to a randomly chosen DNS server
-
             if protocol == "udp":
                 sock.sendto(request, (host, int(port)))
                 reply = sock.recv(1024)
@@ -346,7 +358,7 @@ class DNSHandler(object):
                 sock.connect((host, int(port)))
 
                 # Add length for the TCP request
-                length = binascii.unhexlify("%04x" % len(request))
+                length = unhexlify("%04x" % len(request))
                 sock.sendall(length + request)
 
                 # Strip length from the response
@@ -362,7 +374,7 @@ class DNSHandler(object):
 
 
 # UDP DNS Handler for incoming requests
-class UDPHandler(DNSHandler, SocketServer.BaseRequestHandler):
+class UDPHandler(DNSHandler, BaseRequestHandler):
     def handle(self):
         (data, socket) = self.request
         response = self.parse(data)
@@ -372,7 +384,7 @@ class UDPHandler(DNSHandler, SocketServer.BaseRequestHandler):
 
 
 # TCP DNS Handler for incoming requests            
-class TCPHandler(DNSHandler, SocketServer.BaseRequestHandler):
+class TCPHandler(DNSHandler, BaseRequestHandler):
     def handle(self):
         data = self.request.recv(1024)
 
@@ -384,23 +396,22 @@ class TCPHandler(DNSHandler, SocketServer.BaseRequestHandler):
         if response:
             # Calculate and add the additional "length" parameter
             # used in TCP DNS protocol 
-            length = binascii.unhexlify("%04x" % len(response))
+            length = unhexlify("%04x" % len(response))
             self.request.sendall(length + response)
 
 
-class ThreadedUDPServer(SocketServer.ThreadingMixIn, SocketServer.UDPServer):
+class ThreadedUDPServer(ThreadingMixIn, UDPServer):
     # Override SocketServer.UDPServer to add extra parameters
     def __init__(self, server_address, RequestHandlerClass, nametodns, nameservers, ipv6, log):
         self.nametodns = nametodns
         self.nameservers = nameservers
         self.ipv6 = ipv6
-        self.address_family = socket.AF_INET6 if self.ipv6 else socket.AF_INET
+        self.address_family = AF_INET6 if self.ipv6 else AF_INET
         self.log = log
+        UDPServer.__init__(self, server_address, RequestHandlerClass)
 
-        SocketServer.UDPServer.__init__(self, server_address, RequestHandlerClass)
 
-
-class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
+class ThreadedTCPServer(ThreadingMixIn, TCPServer):
     # Override default value
     allow_reuse_address = True
 
@@ -409,17 +420,19 @@ class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
         self.nametodns = nametodns
         self.nameservers = nameservers
         self.ipv6 = ipv6
-        self.address_family = socket.AF_INET6 if self.ipv6 else socket.AF_INET
+        self.address_family = AF_INET6 if self.ipv6 else AF_INET
         self.log = log
-
-        SocketServer.TCPServer.__init__(self, server_address, RequestHandlerClass)
+        TCPServer.__init__(self, server_address, RequestHandlerClass)
 
 
 # Initialize and start the DNS Server
-def start_cooking(interface, nametodns, nameservers, tcp=False, ipv6=False, port="53", logfile=None):
-    try:
+def start_cooking(interface, nametodns, nameservers, tcp=False, ipv6=False, port=53, logfile=None):
+    if geteuid() != 0 and port == 53:
+        print('[!] Run as root, please.')
+        exit(-1)
 
-        if logfile:
+    try:
+        if logfile is not None:
             log = open(logfile, 'a', 0)
             log.write("[%s] DNSChef is active.\n" % (time.strftime("%d/%b/%Y:%H:%M:%S %z")))
         else:
@@ -445,16 +458,16 @@ def start_cooking(interface, nametodns, nameservers, tcp=False, ipv6=False, port
             time.sleep(100)
 
     except (KeyboardInterrupt, SystemExit):
-
         if log:
             log.write("[%s] DNSChef is shutting down.\n" % (time.strftime("%d/%b/%Y:%H:%M:%S %z")))
             log.close()
 
         server.shutdown()
         print("[*] DNSChef is shutting down.")
-        sys.exit()
+        exit()
 
-    except IOError:
+    except IOError, e:
+        print(e)
         print("[!] Failed to open log file for writing.")
 
     except Exception, e:
@@ -462,7 +475,6 @@ def start_cooking(interface, nametodns, nameservers, tcp=False, ipv6=False, port
 
 
 if __name__ == "__main__":
-
     header = "          _                _          __  \n"
     header += "         | | version %s  | |        / _| \n" % DNSCHEF_VERSION
     header += "       __| |_ __  ___  ___| |__   ___| |_ \n"
@@ -530,7 +542,7 @@ if __name__ == "__main__":
     rungroup.add_option("-t", "--tcp", action="store_true", default=False,
                         help="Use TCP DNS proxy instead of the default UDP.")
     rungroup.add_option("-6", "--ipv6", action="store_true", default=False, help="Run in IPv6 mode.")
-    rungroup.add_option("-p", "--port", action="store", metavar="53", default="53",
+    rungroup.add_option("-p", "--port", action="store", metavar=53, default=53,
                         help='Port number to listen for DNS requests.')
     rungroup.add_option("-q", "--quiet", action="store_false", dest="verbose", default=True, help="Don't show headers.")
     parser.add_option_group(rungroup)
@@ -550,11 +562,11 @@ if __name__ == "__main__":
     # Incorrect or incomplete command line arguments
     if options.fakedomains and options.truedomains:
         print("[!] You can not specify both 'fakedomains' and 'truedomains' parameters.")
-        sys.exit(0)
+        exit(0)
 
     elif not (options.fakeip or options.fakeipv6) and (options.fakedomains or options.truedomains):
         print("[!] You have forgotten to specify which IP to use for fake responses")
-        sys.exit(0)
+        exit(0)
 
     # Notify user about alternative listening port
     if options.port != "53":
